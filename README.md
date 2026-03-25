@@ -337,6 +337,39 @@ ref_strength: 3.00      2.00      1.00     0.50      0.00
 
 ---
 
+## BETA: Mask-Guided Reference Latent Controller
+
+<a href="examples/full.png">
+  <img src="examples/full.png" alt="FLUX.2 Klein Mask Ref Controller" width="900">
+</a>
+
+> Experimental — results are promising but behavior may vary depending on prompt and image complexity.
+
+### FLUX.2 Klein Mask Ref Controller
+
+Spatially controls the reference latent using a mask. Masked area gets targeted by the prompt while staying true to its original structure. Unmasked area gets fully freed up for the prompt to take over.
+
+Not inpainting — works entirely at the conditioning level through the reference latent stream.
+
+#### Parameters
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `mask` | — | MASK | Defines targeted vs free regions. Connect from any ComfyUI mask node. |
+| `strength` | 1.0 | 0.0 to 1.0 | How free the unmasked area is. 1.0 = reference fully removed there. 0.5 = half reference kept. Lower values also bleed influence into surrounding areas. |
+| `invert_mask` | False | True/False | Flip targeted and free regions. |
+| `feather` | 0 | 0 to 64 | Gaussian blur on mask edges in latent space. Reduces hard seams at boundaries. |
+| `channel_mode` | all | all/low/high | Which latent channels the mask affects. `low` = structure/layout (ch 0-63), `high` = texture/detail (ch 64-127). |
+| `debug` | False | True/False | Print spatial stats and attenuation to console. |
+
+#### Notes
+- Requires image edit mode — reference latents must be present in conditioning metadata
+- `strength` also controls boundary bleed — 1.0 is a tight boundary, lower values spread influence into neighboring regions
+- Useful for targeting a specific subject within a scene while leaving the rest open to the prompt
+
+
+
+
 ## Visual Results: Vanilla vs. With Flux2Klein-Enhancer
 
 Exact same workflow, seed and prompt - only difference is using the node or not.
