@@ -65,16 +65,6 @@ This means:
 
 ## Nodes
 
-### Core Enhancement Nodes
-
-<a href="examples/node_fixed.png">
-  <img src="examples/node_fixed.png" alt="FLUX.2 Klein Enhancer" width="900">
-</a>
-
-<a href="examples/updated_sample.png">
-  <img src="examples/updated_sample.png" alt="FLUX.2 Klein Enhancer" width="900">
-</a>
-
 ### FLUX.2 Klein Enhancer
 
 General-purpose text conditioning enhancement for both text-to-image and image editing workflows.
@@ -112,16 +102,6 @@ Regional control over prompt conditioning. Divides active tokens into front/mid/
 
 ---
 
-## Reference Latent Control
-
-<a href="examples/new_wf.png">
-  <img src="examples/new_wf.png" alt="FLUX.2 Klein ref" width="500">
-</a>
-
-<a href="examples/new_nodes.png">
-  <img src="examples/new_nodes.png" alt="FLUX.2 Klein ref" width="500">
-</a>
-
 ### FLUX.2 Klein Ref Latent Controller
 
 Controls how strongly a specific reference image influences the generation. Requires a `MODEL` input and returns an updated `MODEL`. Chain multiple nodes to control each reference independently.
@@ -158,42 +138,7 @@ Minimal per-reference k/v scaler. Takes and returns `MODEL` only. Chain one node
 | `reference_index` | 0 | 0 to 7 | Which reference image to weight (0 = first). |
 | `weight` | 1.0 | 0.0 to 5.0 | 1.0 = unchanged, 0.0 = invisible, >1.0 = stronger influence. |
 
-<a href="examples/Figure_003.png">
-  <img src="examples/Figure_003.png" alt="FLUX.2 Klein ref" width="1000">
-</a>
 
----
-
-## Front/Mid/End Separation Examples
-
-<a href="examples/front.png">
-  <img src="examples/front.png" alt="FLUX.2 Detail Controller" width="500">
-</a>
-<a href="examples/mid.png">
-  <img src="examples/mid.png" alt="FLUX.2 Detail Controller" width="500">
-</a>
-<a href="examples/end.png">
-  <img src="examples/end.png" alt="FLUX.2 Detail Controller" width="500">
-</a>
-
-**Prompt:** turn only the ground into a mirror surface reflecting the sky, keep the full dog and its body unchanged and add the dog's reflection below
-
----
-
-## Sectioned Encoder Node
-
-<a href="examples/new_node.png">
-  <img src="examples/new_node.png" alt="FLUX.2 Detail Controller" width="500">
-</a>
-<a href="examples/eg1.png">
-  <img src="examples/eg1.png" alt="FLUX.2 Detail Controller" width="500">
-</a>
-<a href="examples/eg2.png">
-  <img src="examples/eg2.png" alt="FLUX.2 Detail Controller" width="500">
-</a>
-<a href="examples/eg3.png">
-  <img src="examples/eg3.png" alt="FLUX.2 Detail Controller" width="500">
-</a>
 
 ---
 
@@ -225,15 +170,6 @@ Same as linear, just a different name.
 - **1.40-1.50**: Tighter control when needed, very prompt-dependent
 - **0.0-1.0**: Standard range from full enhancement to balanced preservation
 
-<a href="examples/updated_01_26.png">
-  <img src="examples/updated_01_26.png" alt="Preservation_01" width="1280">
-</a>
-<a href="examples/added_preservation.png">
-  <img src="examples/added_preservation.png" alt="Preservation_02" width="1280">
-</a>
-<a href="examples/Figure_01.png">
-  <img src="examples/Figure_01.png" alt="Preservation" width="1280">
-</a>
 
 ---
 
@@ -349,31 +285,6 @@ Not inpainting — works entirely at the conditioning level through the referenc
 - `strength` also controls boundary bleed — 1.0 is a tight boundary, lower values spread influence into neighboring regions
 - Useful for targeting a specific subject within a scene while leaving the rest open to the prompt
 
-
-
-
-## Visual Results: Vanilla vs. With Flux2Klein-Enhancer
-
-Exact same workflow, seed and prompt - only difference is using the node or not.
-
-### Source Photo
-[![Source](examples/source_02.jpg)](examples/source_02.jpg)
-
-### Comparison 1
-**Prompt:** turn only the ground into a mirror surface reflecting the sky, keep the full dog and its body unchanged and add the dog's reflection below
-
-Vanilla Flux.2 Klein          |  With Enhancer Node
-:-----------------------------:|:-----------------------------:
-[![Vanilla](examples/vanilla_01.png)](examples/vanilla_01.png) | [![With Node](examples/with_node_01.png)](examples/with_node_01.png)
-
-### Comparison 2
-**Prompt:** replace the grass with shallow ocean water and add realistic water reflections of the dog, keep the sunny lighting
-
-Vanilla                       |  With Enhancer Node
-:-----------------------------:|:-----------------------------:
-[![Vanilla](examples/vanilla_02.png)](examples/vanilla_02.png) | [![With Node](examples/with_node_02.png)](examples/with_node_02.png)
-
----
 
 ## Technical Details
 
