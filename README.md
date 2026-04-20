@@ -353,8 +353,30 @@ Both nodes can be stacked. Identity Guidance handles macro-level correction in l
 ```
 [Checkpoint] → MODEL → [Identity Feature Transfer] → MODEL → [Identity Guidance] → MODEL → [KSampler]
 ```
+---
 
+### FLUX.2 Klein KSampler
 
+Drop-in replacement for KSampler built specifically for Klein. Uses a resolution-dependent dynamic sigma schedule and raw flow matching ODE integration — the same math the original architecture was designed around.
+
+The key difference is that this sampler calls the diffusion model directly, injecting real timestep values `t ∈ [0, 1]` straight into the forward pass. No sigma conversion, no `model_sampling` wrapper, no scheduler abstraction in between. The timestep the model sees is the actual flow matching timestep — not a sigma that gets converted back.
+
+#### Parameters
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `steps` | 25 | 1 to 100 | Denoising steps. Base uses 25. Distilled uses 4-8. |
+| `guidance_scale` | 4.0 | 0.0 to 30.0 | Guidance embedding value. Base uses 4.0. Distilled uses 1.0. This is the guidance embedding, not CFG. |
+| `seed` | 42 | — | Random seed for noise generation. |
+| `denoise` | 1.0 | 0.0 to 1.0 | 1.0 = full denoise from noise. Lower values for img2img. |
+| `base_shift` | 0.5 | 0.0 to 2.0 | Schedule base shift. |
+| `max_shift` | 1.15 | 0.0 to 3.0 | Schedule max shift. |
+
+#### What's Different from KSampler
+
+- **Direct model call with real timesteps**: Calls the diffusion model forward pass directly with `t ∈ [0, 1]`. No sigma conversion layer, no `model_sampling` abstraction. The model gets the timestep it was trained on.
+- **Dynamic sigma schedule**: Shift is computed from image resolution. At 768×1120 the effective shift is ~2.89 vs the default fixed 2.02. A FluxScheduler node gets you the schedule — it doesn't get you the direct forward call.
+- **Raw Euler stepping**: `x = x + dt × velocity` with nothing in between.
 
 
 
