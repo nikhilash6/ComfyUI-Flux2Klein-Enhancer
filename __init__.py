@@ -6,7 +6,6 @@ from .flux2_klein_mask_ref_controller import Flux2KleinMaskRefController
 from .flux2_klein_color_anchor import Flux2KleinColorAnchor
 from .identity_guidance import IdentityGuidance
 from .identity_feature_transfer import IdentityFeatureTransfer
-from .flux2_klein_ksampler import Flux2KleinKSampler
 
 NODE_CLASS_MAPPINGS = {
     **REF_NODES,
@@ -18,7 +17,6 @@ NODE_CLASS_MAPPINGS = {
     "Flux2KleinColorAnchor": Flux2KleinColorAnchor,
     "IdentityGuidance": IdentityGuidance,
     "IdentityFeatureTransfer": IdentityFeatureTransfer,
-    "Flux2KleinKSampler": Flux2KleinKSampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -31,8 +29,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Flux2KleinColorAnchor": "FLUX.2 Klein Color Anchor",
     "IdentityGuidance": "FLUX.2 Klein Identity Guidance",
     "IdentityFeatureTransfer": "FLUX.2 Klein Identity Feature Transfer",
-    "Flux2KleinKSampler": "FLUX.2 Klein KSampler",
 }
 
-__version__ = "3.1.0"
+__version__ = "3.0.0"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
