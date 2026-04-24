@@ -346,6 +346,46 @@ Operates inside the model's attention layers. After each attention block compute
 
 ---
 
+### FLUX.2 Klein Identity Feature Transfer Advanced
+
+Same approach as the standard transfer node, with finer control: per-band strength on double vs single blocks, a similarity floor that gates how tight or loose the pull is, a block schedule, and an optional subject mask that restricts the pull to the masked area of the reference.
+
+**Requires** ReferenceLatent connected. The reference must already be in the image stream.
+
+**Wiring:**
+```
+[Checkpoint] → MODEL → [Identity Feature Transfer Advanced] → MODEL → [KSampler]
+                                              ↑                          ↑
+                                       [MASK (optional)]    [ReferenceLatent] → CONDITIONING
+```
+
+#### Parameters
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `reference_index` | 0 | 0 to 15 | Which reference image to draw features from when multiple are connected (0 = first). |
+| `mode` | cosine_pull | cosine_pull/topk_replace/mean_transfer | Same modes as the standard node. cosine_pull is the only mode that uses the subject mask. |
+| `top_k_percent` | 0.25 | 0.01 to 1.0 | `topk_replace` mode only. Fraction of generation tokens to affect. |
+| `double_enable` | True | True/False | Apply transfer on double blocks (0-7). These shape pose, color, and identity early. |
+| `double_strength` | 0.15 | 0.0 to 1.0 | Per-block blend factor for double blocks. Cumulative. Raise (0.4-0.6) for stronger guidance, especially with multi-subject references. |
+| `double_start` / `double_end` | 0 / 7 | 0 to 7 | Range of double blocks to apply on. |
+| `single_enable` | True | True/False | Apply transfer on single blocks (0-23). These refine style and texture. |
+| `single_strength` | 0.15 | 0.0 to 1.0 | Per-block blend factor for single blocks. Cumulative. |
+| `single_start` / `single_end` | 0 / 23 | 0 to 23 | Range of single blocks to apply on. |
+| `block_schedule` | flat | flat / ramp_down / ramp_up / peak_mid | Strength curve across the active block range. |
+| `sim_floor` | 0.20 | 0.0 to 0.95 | Cosine threshold gating which matches contribute. Low (~0.05) = wide pull, tight identity lock, suited to subtle edits. High = sparse pull, more freedom for broader edits. |
+| `mask_threshold` | 0.5 | 0.0 to 1.0 | Used only when `subject_mask` is connected. Reference tokens whose pooled mask value falls below this are excluded from the pull. 0.5 keeps boundary tokens; raise toward 1.0 to shrink the effective mask inward. |
+| `subject_mask` (optional) | — | MASK | When connected, the cosine pull samples only from masked-in reference tokens. The conditioning latent is not modified. Mask aspect must match the encoded reference aspect. |
+
+#### Tuning notes
+
+- **Subtle edit (outfit swap, same character):** lower `sim_floor` to ~0.05, keep strengths around 0.15-0.20. The pull is wide and locks identity tightly so only the prompted change lands.
+- **Broader edit (new scene, same person):** raise `sim_floor` toward 0.4-0.6. The pull becomes sparse and gives the model freedom to drift.
+- **Reference contains multiple subjects:** paint the desired one as `subject_mask` and raise both block strengths to 0.4-0.6. The default 0.15 is too soft to compete with the model's natural attention to the unmasked subject.
+- **Subject mask source:** ComfyUI's built-in MaskEditor on the reference image works fine. Any MASK output is accepted.
+
+---
+
 ### Combining Both Nodes
 
 Both nodes can be stacked. Identity Guidance handles macro-level correction in latent space. Feature Transfer handles micro-level feature alignment inside attention. They operate at different stages and don't interfere.
