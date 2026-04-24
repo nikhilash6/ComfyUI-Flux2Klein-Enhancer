@@ -5,7 +5,7 @@ from .flux2_sectioned_encoder import Flux2KleinSectionedEncoder
 from .flux2_klein_mask_ref_controller import Flux2KleinMaskRefController
 from .flux2_klein_color_anchor import Flux2KleinColorAnchor
 from .identity_guidance import IdentityGuidance
-from .identity_feature_transfer import IdentityFeatureTransfer
+from .identity_feature_transfer import IdentityFeatureTransfer, IdentityFeatureTransferAdvanced
 from .Flux2klein_Ksampler_exp import NODE_CLASS_MAPPINGS as EXP_NODES, NODE_DISPLAY_NAME_MAPPINGS as EXP_NAMES
 
 NODE_CLASS_MAPPINGS = {
@@ -19,6 +19,7 @@ NODE_CLASS_MAPPINGS = {
     "Flux2KleinColorAnchor": Flux2KleinColorAnchor,
     "IdentityGuidance": IdentityGuidance,
     "IdentityFeatureTransfer": IdentityFeatureTransfer,
+    "IdentityFeatureTransferAdvanced": IdentityFeatureTransferAdvanced,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -32,6 +33,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Flux2KleinColorAnchor": "FLUX.2 Klein Color Anchor",
     "IdentityGuidance": "FLUX.2 Klein Identity Guidance",
     "IdentityFeatureTransfer": "FLUX.2 Klein Identity Feature Transfer",
+    "IdentityFeatureTransferAdvanced": "FLUX.2 Klein Identity Feature Transfer Advanced",
 }
 
 __version__ = "3.1.0"
