@@ -1,6 +1,6 @@
 # ComfyUI-Flux2Klein-Enhancer
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-yellow.svg)](https://buymeacoffee.com/capitan01r)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: PolyForm NC 1.0.0](https://img.shields.io/badge/License-PolyForm%20NC%201.0.0-blue.svg)](LICENSE)
 
 Conditioning enhancement and reference latent control for FLUX.2 Klein 9B in ComfyUI. Built from empirical analysis and forward-pass tracing of the model's dual-stream architecture.
 
@@ -423,3 +423,13 @@ The reference latent concatenation was confirmed by observing:
 ## Acknowledgments
 
 Built through empirical analysis and forward-pass hook tracing of FLUX.2 Klein's conditioning structure and dual-stream architecture.
+
+## License
+
+This project is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**.
+
+- ✅ **Free for noncommercial use** — personal projects, research, hobby work, education, charitable/public-interest organizations, and other noncommercial purposes.
+- ✅ **You may modify, distribute, and build on it** for any noncommercial purpose.
+- ❌ **Commercial use requires a separate license.** If you (or your company) want to use this in a commercial product, paid service, or any revenue-generating context, please contact me first to arrange commercial licensing.
+
+For commercial licensing inquiries, open an issue on the [GitHub repository](https://github.com/capitan01R/ComfyUI-Flux2Klein-Enhancer/issues) or reach out via the contact info on my GitHub profile.
