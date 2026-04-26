@@ -1,18 +1,6 @@
-"""
-FLUX.2 Klein Conditioning Enhancer - v1.1 + Multiple Preserve Modes
-
-Added features:
-- preserve_mode: Choose between different preservation behaviors
-  * linear: Original blend-back method (default, backward compatible)
-  * dampen: Reduce modification strength before applying
-  * blend_after: Same as linear (legacy naming)
-  * hybrid: Dampen first, then blend
-
-Main v1 logic: COMPLETELY UNCHANGED
-"""
+import gc
 
 import torch
-import gc
 
 try:
     import comfy.model_management as mm
@@ -21,19 +9,41 @@ except ImportError:
     HAS_COMFY = False
 
 
+# Klein conditioning structure: 3 stacked Qwen3 hidden-layer slices.
+# 12288 = 3 * 4096 (layers 9, 18, 27 per Klein TE setup in ComfyUI flux.py).
+# 7680 = 3 * 2560 for the smaller Qwen3-4B Klein variant.
+def _layer_slice_size(embed_dim: int) -> int:
+    """Return the per-layer slice width given the total embed dim."""
+    if embed_dim % 3 == 0:
+        return embed_dim // 3
+    # Unknown architecture — disable layer ops gracefully.
+    return embed_dim
+
+
+def _detect_active_end(meta: dict, seq_len: int, override: int) -> int:
+    """Honest active-region detection. Falls back to seq_len, NOT 77."""
+    if override > 0:
+        return min(override, seq_len)
+    attn_mask = meta.get("attention_mask", None)
+    if attn_mask is not None and attn_mask.dim() >= 2:
+        nonzero = attn_mask[0].nonzero()
+        if len(nonzero) > 0:
+            return int(nonzero[-1].item()) + 1
+    return seq_len
+
+
+def _resolve_device(name: str):
+    if name == "auto":
+        if HAS_COMFY:
+            return mm.get_torch_device()
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(name)
+
+
 class Flux2KleinEnhancer:
-    """
-    Conditioning enhancer for FLUX.2 Klein.
-    
-    Operations:
-    - magnitude: Direct scaling of active region embeddings
-    - contrast: Amplify differences between tokens
-    - normalize: Equalize token magnitudes
-    - preserve_original: Blend back original embeddings with multiple modes
-    
-    All operations modify the active text region only (padding untouched).
-    """
-    
+    """Honest scalar/whitening operations on the active region of Klein
+    conditioning, plus Klein-specific per-Qwen3-layer scaling."""
+
     @classmethod
     def INPUT_TYPES(cls):
         devices = ["auto", "cpu"]
@@ -44,265 +54,156 @@ class Flux2KleinEnhancer:
         return {
             "required": {
                 "conditioning": ("CONDITIONING",),
-                "magnitude": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 10.0,
-                    "step": 0.05,
-                    "tooltip": "Scale active region embeddings. >1 = stronger prompt, <1 = weaker."
+                "active_scale": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
+                    "tooltip": "Multiplier on every active-token embedding. 1.0 = unchanged. The model was trained on Qwen3's natural distribution; values far from 1.0 push it off-distribution.",
                 }),
-                "contrast": ("FLOAT", {
-                    "default": 0.0,
-                    "min": -1.0,
-                    "max": 10.0,
-                    "step": 0.05,
-                    "tooltip": "Amplify differences between tokens. >0 = sharper concepts."
+                "per_token_whiten": ("FLOAT", {
+                    "default": 0.0, "min": -1.0, "max": 5.0, "step": 0.05,
+                    "tooltip": "Amplifies per-token deviation from the sequence mean: (x - mean)*(1+w) + mean. >0 widens spread, <0 compresses. Was called 'contrast' in v1.",
                 }),
-                "normalize_strength": ("FLOAT", {
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.05,
-                    "tooltip": "Equalize token magnitudes. Higher = more balanced emphasis."
+                "norm_equalize": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Blend each token toward the per-sequence mean L2 norm. Flattens magnitude variance — fights Qwen3's natural emphasis. 0 = no effect.",
                 }),
             },
             "optional": {
+                "early_layer_scale": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
+                    "tooltip": "Klein-specific. Scale the first Qwen3 layer slice (low-level / structural features). Klein conditioning stacks 3 layers along the embed dim; this targets the first.",
+                }),
+                "mid_layer_scale": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
+                    "tooltip": "Klein-specific. Scale the middle Qwen3 layer slice (intermediate semantic features).",
+                }),
+                "late_layer_scale": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
+                    "tooltip": "Klein-specific. Scale the last Qwen3 layer slice (high-level / abstract semantic features).",
+                }),
                 "preserve_original": ("FLOAT", {
-                    "default": 0.0,
-                    "min": -2.0,
-                    "max": 10.0,
-                    "step": 0.05,
-                    "tooltip": "Blend back original embeddings. 0=full enhancement, 1=no change. For image edit: higher=keep original structure."
-                }),
-                "preserve_mode": (["linear", "dampen", "blend_after", "hybrid"], {
-                    "default": "linear",
-                    "tooltip": "linear: direct blend (original) | dampen: reduce modifications first | blend_after: same as linear | hybrid: dampen then blend"
-                }),
-                "edit_text_weight": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 10.0,
-                    "step": 0.05,
-                    "tooltip": "[IMAGE EDIT] Additional scaling for edit mode. <1 = preserve original, >1 = follow prompt."
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Linear blend back the unmodified active region. 0.0 = full enhancement, 1.0 = no change.",
                 }),
                 "active_end_override": ("INT", {
-                    "default": 0,
-                    "min": 0,
-                    "max": 512,
-                    "step": 1,
-                    "tooltip": "Override active region end. 0 = auto-detect from attention_mask."
+                    "default": 0, "min": 0, "max": 512, "step": 1,
+                    "tooltip": "Override the active-region end. 0 = auto-detect from attention_mask, falls back to full sequence length if mask missing.",
                 }),
-                "low_vram": ("BOOLEAN", {"default": False}),
                 "device": (devices, {"default": "auto"}),
                 "debug": ("BOOLEAN", {"default": False}),
-            }
+            },
         }
 
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "enhance"
     CATEGORY = "conditioning/flux2klein"
 
-    def _get_active_end(self, cond_shape, meta, override):
-        """Determine where active tokens end."""
-        if override > 0:
-            return min(override, cond_shape[1])
-        
-        # Try to get from attention mask
-        attn_mask = meta.get("attention_mask", None)
-        if attn_mask is not None:
-            if attn_mask.dim() == 2:
-                # Find last non-zero position
-                nonzero = attn_mask[0].nonzero()
-                if len(nonzero) > 0:
-                    return int(nonzero[-1].item()) + 1
-        
-        # Default: assume 77 (typical CLIP-style max)
-        return min(77, cond_shape[1])
+    def enhance(self, conditioning, active_scale=1.0, per_token_whiten=0.0,
+                norm_equalize=0.0, early_layer_scale=1.0, mid_layer_scale=1.0,
+                late_layer_scale=1.0, preserve_original=0.0,
+                active_end_override=0, device="auto", debug=False):
 
-    def enhance(self, conditioning, magnitude=1.0, contrast=0.0, normalize_strength=0.0,
-                preserve_original=0.0, preserve_mode="linear", edit_text_weight=1.0, 
-                active_end_override=0, low_vram=False, device="auto", debug=False):
-        
         if not conditioning:
             return (conditioning,)
-        
-        # Check if anything needs to be done
+
         no_op = (
-            magnitude == 1.0 and 
-            contrast == 0.0 and 
-            normalize_strength == 0.0 and
-            preserve_original == 0.0 and
-            edit_text_weight == 1.0
+            active_scale == 1.0
+            and per_token_whiten == 0.0
+            and norm_equalize == 0.0
+            and early_layer_scale == 1.0
+            and mid_layer_scale == 1.0
+            and late_layer_scale == 1.0
+            and preserve_original == 0.0
         )
         if no_op:
             if debug:
-                print("[Flux2KleinEnhancer] All parameters neutral, passing through")
+                print("[Flux2KleinEnhancer] all params neutral, passing through")
             return (conditioning,)
-        
-        # Device setup
-        if device == "auto":
-            if HAS_COMFY:
-                device = mm.get_torch_device()
-            else:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            device = torch.device(device)
-        
-        compute_dtype = torch.float16 if low_vram and device.type == "cuda" else torch.float32
-        
+
+        dev = _resolve_device(device)
         output = []
-        
+
         for idx, (cond_tensor, meta) in enumerate(conditioning):
             original_dtype = cond_tensor.dtype
-            cond = cond_tensor.to(device, dtype=compute_dtype)
-            
-            if len(cond.shape) != 3:
-                if debug:
-                    print(f"[Flux2KleinEnhancer] Item {idx}: unexpected shape {cond.shape}, skipping")
+            cond = cond_tensor.to(dev, dtype=torch.float32)
+
+            if cond.dim() != 3:
                 output.append((cond_tensor, meta))
                 continue
-            
-            batch, seq_len, embed_dim = cond.shape
-            
-            # Get active region
-            active_end = self._get_active_end(cond.shape, meta, active_end_override)
-            is_edit_mode = "reference_latents" in meta and meta["reference_latents"] is not None
-            
-            if debug:
-                print(f"\n{'='*50}")
-                print(f"Flux2KleinEnhancer Item {idx}")
-                print(f"{'='*50}")
-                print(f"Shape: {cond.shape}")
-                print(f"Active region: 0 to {active_end}")
-                print(f"Edit mode: {is_edit_mode}")
-                print(f"Preserve mode: {preserve_mode}")
-                if active_end < seq_len:
-                    print(f"Active std: {cond[:, :active_end, :].std().item():.4f}")
-                    print(f"Padding std: {cond[:, active_end:, :].std().item():.4f}")
-            
-            # Extract active region only
+
+            seq_len, embed_dim = cond.shape[1], cond.shape[2]
+            active_end = _detect_active_end(meta, seq_len, active_end_override)
+            slice_w = _layer_slice_size(embed_dim)
+
             active = cond[:, :active_end, :].clone()
-            original_active = active.clone()  # Store for preserve_original
-            
+            original_active = active.clone()
+
             if debug:
-                orig_norm = active.norm(dim=-1).mean().item()
-                print(f"\nBefore modifications:")
-                print(f"  Active region mean norm: {orig_norm:.4f}")
-            
-            # ============================================================
-            # DAMPEN MODE: Apply preservation BEFORE modifications
-            # ============================================================
-            if preserve_mode == "dampen" and preserve_original != 0.0:
-                # Calculate dampening factors for all operations
-                damping = 1.0 - preserve_original
-                
-                # Dampen the modification parameters
-                dampened_magnitude = 1.0 + (magnitude - 1.0) * damping
-                dampened_contrast = contrast * damping
-                dampened_normalize = normalize_strength * damping
-                dampened_edit_weight = 1.0 + (edit_text_weight - 1.0) * damping
-                
-                if debug:
-                    print(f"\nDampen mode ({preserve_original:.2f}):")
-                    print(f"  magnitude: {magnitude:.2f} -> {dampened_magnitude:.3f}")
-                    print(f"  contrast: {contrast:.2f} -> {dampened_contrast:.3f}")
-                    print(f"  normalize: {normalize_strength:.2f} -> {dampened_normalize:.3f}")
-                    print(f"  edit_weight: {edit_text_weight:.2f} -> {dampened_edit_weight:.3f}")
-                
-                # Use dampened values
-                magnitude = dampened_magnitude
-                contrast = dampened_contrast
-                normalize_strength = dampened_normalize
-                edit_text_weight = dampened_edit_weight
-            
-            # ============================================================
-            # OPERATION 1: Contrast (amplify token differences)
-            # ============================================================
-            if contrast != 0.0:
+                print(f"[Flux2KleinEnhancer] item {idx} | shape={tuple(cond.shape)} | "
+                      f"active=[0:{active_end}] | layer_slice_width={slice_w}")
+
+            # 1) per-token whitening (deviation amplification around seq mean).
+            if per_token_whiten != 0.0:
                 seq_mean = active.mean(dim=1, keepdim=True)
-                deviation = active - seq_mean
-                active = seq_mean + deviation * (1.0 + contrast)
-                
-                if debug:
-                    print(f"\nContrast ({contrast:+.2f}): deviation scaled by {1.0 + contrast:.2f}")
-            
-            # ============================================================
-            # OPERATION 2: Normalize (equalize token magnitudes)
-            # ============================================================
-            if normalize_strength > 0.0:
-                token_norms = active.norm(dim=-1, keepdim=True)
-                mean_norm = token_norms.mean()
-                normalized = active / (token_norms + 1e-8) * mean_norm
-                active = active * (1.0 - normalize_strength) + normalized * normalize_strength
-                
-                if debug:
-                    norm_var_before = token_norms.var().item()
-                    norm_var_after = active.norm(dim=-1).var().item()
-                    print(f"\nNormalize ({normalize_strength:.2f}): norm variance {norm_var_before:.4f} -> {norm_var_after:.4f}")
-            
-            # ============================================================
-            # OPERATION 3: Magnitude (direct scaling)
-            # ============================================================
-            if magnitude != 1.0:
-                active = active * magnitude
-                if debug:
-                    print(f"\nMagnitude ({magnitude:.2f}): all active tokens scaled")
-            
-            # ============================================================
-            # OPERATION 4: Edit mode text weight (additional scaling)
-            # ============================================================
-            if is_edit_mode and edit_text_weight != 1.0:
-                active = active * edit_text_weight
-                if debug:
-                    print(f"\nEdit text weight ({edit_text_weight:.2f}): applied for image edit mode")
-            
-            # ============================================================
-            # OPERATION 5: Preserve Original (blend back)
-            # ============================================================
-            if preserve_original != 0.0 and preserve_mode in ["linear", "blend_after", "hybrid"]:
-                # Linear interpolation: result = enhanced * (1-p) + original * p
-                # p=0: fully enhanced
-                # p=1: original unchanged
-                # p>1: over-preserve (can create interesting effects)
+                active = seq_mean + (active - seq_mean) * (1.0 + per_token_whiten)
+
+            # 2) per-token L2 norm equalization.
+            if norm_equalize > 0.0:
+                token_norms = active.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                target_norm = token_norms.mean()
+                normalized = active / token_norms * target_norm
+                active = active * (1.0 - norm_equalize) + normalized * norm_equalize
+
+            # 3) Active-region scalar.
+            if active_scale != 1.0:
+                active = active * active_scale
+
+            # 4) Klein-specific per-layer scale (only if embed dim is 3*N).
+            if slice_w * 3 == embed_dim and (
+                early_layer_scale != 1.0 or mid_layer_scale != 1.0 or late_layer_scale != 1.0
+            ):
+                if early_layer_scale != 1.0:
+                    active[:, :, :slice_w] = active[:, :, :slice_w] * early_layer_scale
+                if mid_layer_scale != 1.0:
+                    active[:, :, slice_w:2 * slice_w] = active[:, :, slice_w:2 * slice_w] * mid_layer_scale
+                if late_layer_scale != 1.0:
+                    active[:, :, 2 * slice_w:] = active[:, :, 2 * slice_w:] * late_layer_scale
+
+            # 5) Preserve original (linear blend back).
+            if preserve_original > 0.0:
                 active = active * (1.0 - preserve_original) + original_active * preserve_original
-                
-                if debug:
-                    blend_pct = min(preserve_original * 100, 100)
-                    mode_name = "Hybrid blend" if preserve_mode == "hybrid" else "Linear blend"
-                    print(f"\n{mode_name} ({preserve_original:.2f}): {blend_pct:.0f}% original blended back")
-            
-            # Write back to full tensor
+
             result = cond.clone()
             result[:, :active_end, :] = active
-            
+
             if debug:
-                final_norm = result[:, :active_end, :].norm(dim=-1).mean().item()
                 diff = (result - cond).abs()
-                print(f"\nFinal state:")
-                print(f"  Active region mean norm: {orig_norm:.4f} -> {final_norm:.4f}")
-                print(f"  Output change: mean={diff.mean().item():.6f}, max={diff.max().item():.6f}")
-            
+                print(f"  output diff: mean={diff.mean().item():.6f} max={diff.max().item():.6f}")
+
             output.append((result.to("cpu", dtype=original_dtype), meta))
-            
             del cond, active, original_active, result
-        
-        if device.type == "cuda":
+
+        if dev.type == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
-        
         return (output,)
 
 
 class Flux2KleinDetailController:
+    """Per-section embedding multiplier.
+
+    HONEST MODE (recommended): pair with the Sectioned Encoder. The encoder
+    emits per-token section ranges as conditioning metadata
+    (`meta["klein_sections"]`); this node multiplies the active embeddings
+    inside those exact ranges by user-supplied factors.
+
+    FALLBACK MODE (legacy / not recommended): if no section metadata is
+    present, the node falls back to fixed 25%/50%/25% slicing of the active
+    region. Those boundaries are arbitrary — Qwen3 has no positional
+    semantic role for tokens — and v1 of this node was effectively a placebo
+    in this mode. Kept for back-compat with old workflows; switch to the
+    Sectioned Encoder for meaningful section-aware scaling.
     """
-    Regional control for FLUX.2 Klein conditioning.
-    
-    Divides active tokens into regions:
-    - Front: Subject/main concept
-    - Mid: Details/modifiers
-    - End: Style/quality terms
-    """
-    
+
     @classmethod
     def INPUT_TYPES(cls):
         devices = ["auto", "cpu"]
@@ -316,62 +217,36 @@ class Flux2KleinDetailController:
             },
             "optional": {
                 "front_mult": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 10.0,
-                    "step": 0.05,
-                    "tooltip": "First 25% of active tokens"
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
+                    "tooltip": "Multiplier for the FRONT section. With Sectioned Encoder upstream this is the actual front token range; otherwise it's the first 25% of active tokens (arbitrary).",
                 }),
                 "mid_mult": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 10.0,
-                    "step": 0.05,
-                    "tooltip": "Middle 50% of active tokens"
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
+                    "tooltip": "Multiplier for the MID section.",
                 }),
                 "end_mult": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 10.0,
-                    "step": 0.05,
-                    "tooltip": "Last 25% of active tokens"
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
+                    "tooltip": "Multiplier for the END section.",
                 }),
                 "emphasis_start": ("INT", {
-                    "default": 0,
-                    "min": 0,
-                    "max": 200,
-                    "step": 1,
-                    "tooltip": "Start of custom emphasis region"
+                    "default": 0, "min": 0, "max": 512, "step": 1,
+                    "tooltip": "Custom emphasis range start (token index).",
                 }),
                 "emphasis_end": ("INT", {
-                    "default": 0,
-                    "min": 0,
-                    "max": 200,
-                    "step": 1,
-                    "tooltip": "End of custom emphasis region (0 = disabled)"
+                    "default": 0, "min": 0, "max": 512, "step": 1,
+                    "tooltip": "Custom emphasis range end (0 = disabled).",
                 }),
                 "emphasis_mult": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 10.0,
-                    "step": 0.1,
-                    "tooltip": "Multiplier for emphasis region"
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1,
+                    "tooltip": "Multiplier applied inside [emphasis_start, emphasis_end).",
                 }),
                 "preserve_original": ("FLOAT", {
-                    "default": 0.0,
-                    "min": -2.0,
-                    "max": 10.0,
-                    "step": 0.05,
-                    "tooltip": "Blend back original embeddings. 0=full enhancement, 1=no change. For image edit: higher=keep original structure."
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Linear blend back the unmodified active region. 0 = full effect.",
                 }),
-                "preserve_mode": (["linear", "dampen", "blend_after", "hybrid"], {
-                    "default": "linear",
-                    "tooltip": "linear: direct blend (original) | dampen: reduce modifications first | blend_after: same as linear | hybrid: dampen then blend"
-                }),
-                "low_vram": ("BOOLEAN", {"default": False}),
                 "device": (devices, {"default": "auto"}),
                 "debug": ("BOOLEAN", {"default": False}),
-            }
+            },
         }
 
     RETURN_TYPES = ("CONDITIONING",)
@@ -380,148 +255,84 @@ class Flux2KleinDetailController:
 
     def control(self, conditioning, front_mult=1.0, mid_mult=1.0, end_mult=1.0,
                 emphasis_start=0, emphasis_end=0, emphasis_mult=1.0,
-                preserve_original=0.0, preserve_mode="linear", low_vram=False, 
-                device="auto", debug=False):
-        
+                preserve_original=0.0, device="auto", debug=False):
+
         if not conditioning:
             return (conditioning,)
-        
-        # Check if anything needs to be done
+
         no_op = (
-            front_mult == 1.0 and 
-            mid_mult == 1.0 and 
-            end_mult == 1.0 and
-            (emphasis_end == 0 or emphasis_mult == 1.0) and
-            preserve_original == 0.0
+            front_mult == 1.0 and mid_mult == 1.0 and end_mult == 1.0
+            and (emphasis_end == 0 or emphasis_mult == 1.0)
+            and preserve_original == 0.0
         )
         if no_op:
-            if debug:
-                print("[Flux2KleinDetailController] All parameters neutral, passing through")
             return (conditioning,)
-        
-        # Device setup
-        if device == "auto":
-            if HAS_COMFY:
-                device = mm.get_torch_device()
-            else:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            device = torch.device(device)
-        
-        compute_dtype = torch.float16 if low_vram and device.type == "cuda" else torch.float32
-        
+
+        dev = _resolve_device(device)
         output = []
-        
+
         for idx, (cond_tensor, meta) in enumerate(conditioning):
             original_dtype = cond_tensor.dtype
-            cond = cond_tensor.to(device, dtype=compute_dtype)
-            
-            if len(cond.shape) != 3:
+            cond = cond_tensor.to(dev, dtype=torch.float32)
+            if cond.dim() != 3:
                 output.append((cond_tensor, meta))
                 continue
-            
-            batch, seq_len, embed_dim = cond.shape
-            
-            # Get active region from attention mask
-            attn_mask = meta.get("attention_mask", None)
-            if attn_mask is not None and attn_mask.dim() == 2:
-                nonzero = attn_mask[0].nonzero()
-                active_end = int(nonzero[-1].item()) + 1 if len(nonzero) > 0 else 77
+
+            seq_len = cond.shape[1]
+            active_end = _detect_active_end(meta, seq_len, 0)
+
+            # Determine section ranges. PREFERRED: from sectioned encoder.
+            sections = meta.get("klein_sections")
+            if sections and all(k in sections for k in ("front", "mid", "end")):
+                front_range = sections["front"]
+                mid_range = sections["mid"]
+                end_range = sections["end"]
+                source = "klein_sections (encoder-emitted, real boundaries)"
             else:
-                active_end = min(77, seq_len)
-            
+                num = active_end
+                f_end = int(num * 0.25)
+                m_end = int(num * 0.75)
+                front_range = (0, f_end)
+                mid_range = (f_end, m_end)
+                end_range = (m_end, num)
+                source = "fixed 25/50/25 fallback (arbitrary — pair with Sectioned Encoder for honest section ranges)"
+
+            if debug:
+                print(f"[Flux2KleinDetailController] item {idx} | active=[0:{active_end}] | source={source}")
+                print(f"  front={front_range} mid={mid_range} end={end_range}")
+
             active = cond[:, :active_end, :].clone()
-            original_active = active.clone()  # Store for preserve_original
-            num_tokens = active.shape[1]
-            
-            if debug:
-                print(f"\n{'='*50}")
-                print(f"Flux2KleinDetailController Item {idx}")
-                print(f"{'='*50}")
-                print(f"Active tokens: {num_tokens}")
-                print(f"Preserve mode: {preserve_mode}")
-            
-            # ============================================================
-            # DAMPEN MODE: Apply preservation BEFORE regional operations
-            # ============================================================
-            if preserve_mode == "dampen" and preserve_original != 0.0:
-                # Dampen the regional multipliers based on preserve_original
-                damping = 1.0 - preserve_original
-                
-                front_mult = 1.0 + (front_mult - 1.0) * damping
-                mid_mult = 1.0 + (mid_mult - 1.0) * damping
-                end_mult = 1.0 + (end_mult - 1.0) * damping
-                emphasis_mult = 1.0 + (emphasis_mult - 1.0) * damping
-                
-                if debug:
-                    print(f"\nDampen mode ({preserve_original:.2f}):")
-                    print(f"  front_mult: -> {front_mult:.3f}")
-                    print(f"  mid_mult: -> {mid_mult:.3f}")
-                    print(f"  end_mult: -> {end_mult:.3f}")
-                    print(f"  emphasis_mult: -> {emphasis_mult:.3f}")
-            
-            # Calculate region boundaries
-            front_end = int(num_tokens * 0.25)
-            mid_end = int(num_tokens * 0.75)
-            
-            if debug:
-                print(f"Regions: front=[0:{front_end}], mid=[{front_end}:{mid_end}], end=[{mid_end}:{num_tokens}]")
-            
-            # Apply regional multipliers
-            if front_mult != 1.0 and front_end > 0:
-                active[:, :front_end, :] *= front_mult
-                if debug:
-                    print(f"  Front: x{front_mult:.3f}")
-            
-            if mid_mult != 1.0 and mid_end > front_end:
-                active[:, front_end:mid_end, :] *= mid_mult
-                if debug:
-                    print(f"  Mid: x{mid_mult:.3f}")
-            
-            if end_mult != 1.0 and num_tokens > mid_end:
-                active[:, mid_end:, :] *= end_mult
-                if debug:
-                    print(f"  End: x{end_mult:.3f}")
-            
-            # Custom emphasis region
+            original_active = active.clone()
+
+            def _scale(rng, mult):
+                s, e = rng
+                s = max(0, min(s, active_end))
+                e = max(s, min(e, active_end))
+                if mult == 1.0 or e <= s:
+                    return
+                active[:, s:e, :] = active[:, s:e, :] * mult
+
+            _scale(front_range, front_mult)
+            _scale(mid_range, mid_mult)
+            _scale(end_range, end_mult)
+
             if emphasis_end > 0 and emphasis_mult != 1.0:
-                emp_start = max(0, min(emphasis_start, num_tokens - 1))
-                emp_end = max(emp_start + 1, min(emphasis_end, num_tokens))
-                active[:, emp_start:emp_end, :] *= emphasis_mult
-                if debug:
-                    print(f"  Emphasis [{emp_start}:{emp_end}]: x{emphasis_mult:.3f}")
-            
-            # ============================================================
-            # Preserve Original (blend back)
-            # ============================================================
-            if preserve_original != 0.0 and preserve_mode in ["linear", "blend_after", "hybrid"]:
+                _scale((emphasis_start, emphasis_end), emphasis_mult)
+
+            if preserve_original > 0.0:
                 active = active * (1.0 - preserve_original) + original_active * preserve_original
-                
-                if debug:
-                    blend_pct = min(preserve_original * 100, 100)
-                    mode_name = "Hybrid blend" if preserve_mode == "hybrid" else "Linear blend"
-                    print(f"\n{mode_name} ({preserve_original:.2f}): {blend_pct:.0f}% original blended back")
-            
-            # Write back
+
             result = cond.clone()
             result[:, :active_end, :] = active
-            
-            if debug:
-                diff = (result - cond).abs()
-                print(f"Output change: mean={diff.mean().item():.6f}, max={diff.max().item():.6f}")
-            
+
             output.append((result.to("cpu", dtype=original_dtype), meta))
-            
-            del cond, active, original_active, result
-        
-        if device.type == "cuda":
+
+        if dev.type == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
-        
         return (output,)
 
 
-# Node registration
 NODE_CLASS_MAPPINGS = {
     "Flux2KleinEnhancer": Flux2KleinEnhancer,
     "Flux2KleinDetailController": Flux2KleinDetailController,
