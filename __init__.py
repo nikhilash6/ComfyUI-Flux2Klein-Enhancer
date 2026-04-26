@@ -36,5 +36,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IdentityFeatureTransferAdvanced": "FLUX.2 Klein Identity Feature Transfer Advanced",
 }
 
-__version__ = "3.2.0"
+__version__ = "3.2.1"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
