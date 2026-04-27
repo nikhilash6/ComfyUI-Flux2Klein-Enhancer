@@ -127,18 +127,6 @@ Single slider to balance text conditioning vs. all reference images. Requires a 
 | `balance` | 0.005 | 0.000 to 1.000 | 0 = reference only, 0.5 = balanced, 1 = text only. |
 | `debug` | False | True/False | Prints text and ref scale factors per block to console. |
 
-### FLUX.2 Klein Ref Latent Weight
-
-Minimal per-reference k/v scaler. Takes and returns `MODEL` only. Chain one node per reference for independent per-reference control.
-
-#### Parameters
-
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| `reference_index` | 0 | 0 to 7 | Which reference image to weight (0 = first). |
-| `weight` | 1.0 | 0.0 to 5.0 | 1.0 = unchanged, 0.0 = invisible, >1.0 = stronger influence. |
-
-
 
 ---
 
