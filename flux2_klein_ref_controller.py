@@ -221,12 +221,65 @@ class Flux2KleinTextRefBalance:
         return (m, conditioning)
 
 
+class Flux2KleinRefLatentWeight:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "reference_index": ("INT", {
+                    "default": 0, "min": 0, "max": 7,
+                }),
+                "weight": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "execute"
+    CATEGORY = "conditioning/flux2klein"
+
+    def execute(self, model, reference_index, weight):
+        m = model.clone()
+
+        _ref_idx = reference_index
+        _weight  = weight
+
+        def ref_weight_patch(q, k, v, extra_options={}, **kwargs):
+            ref_tokens = extra_options.get("reference_image_num_tokens", [])
+            if not ref_tokens or _ref_idx >= len(ref_tokens):
+                return {}
+
+            total_ref = sum(ref_tokens)
+            tok_start = sum(ref_tokens[:_ref_idx])
+            tok_end   = tok_start + ref_tokens[_ref_idx]
+
+            seq_start = -total_ref + tok_start
+            seq_end   = -total_ref + tok_end
+
+            seq_end_idx = None if seq_end == 0 else seq_end
+
+            k = k.clone()
+            v = v.clone()
+            k[:, :, seq_start:seq_end_idx, :] *= _weight
+            v[:, :, seq_start:seq_end_idx, :] *= _weight
+
+            return {"q": q, "k": k, "v": v}
+
+        m.set_model_attn1_patch(ref_weight_patch)
+        return (m,)
+
+
 NODE_CLASS_MAPPINGS = {
     "Flux2KleinRefLatentController":  Flux2KleinRefLatentController,
     "Flux2KleinTextRefBalance":       Flux2KleinTextRefBalance,
+    "Flux2KleinRefLatentWeight":      Flux2KleinRefLatentWeight,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Flux2KleinRefLatentController": "FLUX.2 Klein Ref Latent Controller",
     "Flux2KleinTextRefBalance":      "FLUX.2 Klein Text/Ref Balance",
+    "Flux2KleinRefLatentWeight":     "FLUX.2 Klein Ref Latent Weight",
 }
