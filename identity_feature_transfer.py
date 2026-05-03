@@ -536,6 +536,10 @@ class IdentityFeatureTransferV3:
     FUNCTION = "apply"
     CATEGORY = "conditioning/flux2klein"
 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
     @staticmethod
     def _parse_schedule(text, max_block):
         out = {}
@@ -754,7 +758,15 @@ class IdentityFeatureTransferV3:
             return out
 
         if debug:
-            print(f"[IdentityFeatureTransferV3] preset={preset} doubles={double_map} singles={single_map}")
+            print(
+                "[IdentityFeatureTransferV3] "
+                f"preset={preset} "
+                f"double_sim={cfg['double_sim']} single_sim={cfg['single_sim']} "
+                f"commit_margin={cfg['commit_margin']} "
+                f"commit_confirm={cfg['commit_confirm']} "
+                f"commit_anchor={cfg['commit_anchor']} "
+                f"doubles={double_map} singles={single_map}"
+            )
 
         m.set_model_attn1_output_patch(output_patch)
         return (m,)
