@@ -374,6 +374,74 @@ Same approach as the standard transfer node, with finer control: per-band streng
 
 ---
 
+### FLUX.2 Klein Identity Feature Transfer V3
+
+Shipment-ready identity preservation node for FLUX.2 Klein. This is the easier version to use.
+
+V3 uses a commit system instead of constantly averaging the generation toward the whole reference. Each generation token looks for the best matching reference token. If the same match stays stable, it locks to that match and then keeps a lighter anchor instead of continuing to pull hard every block.
+
+This gives cleaner preservation and less feature mush.
+
+**Requires** ReferenceLatent connected. The reference must already be in the image stream.
+
+**Wiring:**
+```
+[Checkpoint] -> MODEL -> [Identity Feature Transfer V3] -> MODEL -> [KSampler]
+                                             ↑                         ↑
+                                      [MASK optional]    [ReferenceLatent] -> CONDITIONING
+```
+
+#### Presets
+
+| Preset | Use |
+|--------|-----|
+| `MIDUM_LOCK` | Recommended starting point. Uses the tested middle preset. |
+| `HARD_LOCK` | Strongest preset. Use when the reference keeps drifting. |
+| `SOFT_LOCK` | Softer preset. Use when the lock is too aggressive. |
+| `custom` | Uses your manual schedules and settings. |
+
+Any preset except `custom` overrides the manual settings below. This is intentional so the node is easier to use.
+
+#### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `preset` | MIDUM_LOCK | Main control. Pick how strongly the reference should hold. |
+| `reference_index` | 0 | Which reference image to use when multiple references are connected. |
+| `double_schedule` | 0-3:mid=0.25; 4:mid=0.35; 5:mid=0.65; 6-7:mid=0.45 | Custom preset only. Controls double blocks. |
+| `single_schedule` | 0:mid=0.35; 1:mid=0.25; 2-10:mid=0.30; 11-19:mid=0.25; 20:mid=0.08; 21:mid=0.10; 22:mid=0.15; 23:mid=0.20 | Custom preset only. Controls single blocks. |
+| `double_sim` | 0.020 | Custom preset only. Higher means fewer double-block matches are allowed. |
+| `single_sim` | 0.020 | Custom preset only. Higher means fewer single-block matches are allowed. |
+| `commit_margin` | 0.035 | Custom preset only. Higher means the match has to be more obvious before it locks. |
+| `commit_confirm` | 2 | Custom preset only. How many times the same match must repeat before it locks. |
+| `commit_anchor` | 0.35 | Custom preset only. How much pull remains after a token has locked. |
+| `mask_threshold` | 0.25 | Used only when `subject_mask` is connected. Lower keeps more edge tokens. |
+| `subject_mask` | optional | Use this when the reference has more than one subject. |
+
+#### Schedule format
+
+```
+4-7:0.20
+2-10:0.10; 14-20:0.07
+```
+
+Left side is the block range. Right side is the strength.
+
+Double blocks are `0-7`.
+Single blocks are `0-23`.
+
+#### Starting points
+
+Use `MIDUM_LOCK` first.
+
+If identity is weak, switch to `HARD_LOCK`.
+
+If the reference is copying too much or distorting the result, switch to `SOFT_LOCK`.
+
+Use `custom` only after you know what you want to change.
+
+---
+
 ### Combining Both Nodes
 
 Both nodes can be stacked. Identity Guidance handles macro-level correction in latent space. Feature Transfer handles micro-level feature alignment inside attention. They operate at different stages and don't interfere.
