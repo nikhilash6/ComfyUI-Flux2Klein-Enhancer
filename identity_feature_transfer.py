@@ -439,12 +439,335 @@ class IdentityFeatureTransferAdvanced:
         return (m,)
 
 
+class IdentityFeatureTransferV3:
+
+    PRESETS = {
+        "HARD_LOCK": {
+            "double_schedule": "0-3:mid=0.25; 4:mid=0.35; 5:mid=0.65; 6-7:mid=0.45",
+            "single_schedule": "0:mid=0.35; 1:mid=0.25; 2-10:mid=0.30; 11-19:mid=0.25; 20:mid=0.08; 21:mid=0.10; 22:mid=0.15; 23:mid=0.20",
+            "double_sim": 0.001,
+            "single_sim": 0.001,
+            "commit_margin": 0.001,
+            "commit_confirm": 1,
+            "commit_anchor": 1.0,
+        },
+        "MIDUM_LOCK": {
+            "double_schedule": "0-3:mid=0.25; 4:mid=0.35; 5:mid=0.65; 6-7:mid=0.45",
+            "single_schedule": "0:mid=0.35; 1:mid=0.25; 2-10:mid=0.30; 11-19:mid=0.25; 20:mid=0.08; 21:mid=0.10; 22:mid=0.15; 23:mid=0.20",
+            "double_sim": 0.020,
+            "single_sim": 0.020,
+            "commit_margin": 0.035,
+            "commit_confirm": 2,
+            "commit_anchor": 0.50,
+        },
+        "SOFT_LOCK": {
+            "double_schedule": "0-3:mid=0.25; 4:mid=0.35; 5:mid=0.65; 6-7:mid=0.45",
+            "single_schedule": "0:mid=0.35; 1:mid=0.25; 2-10:mid=0.30; 11-19:mid=0.25; 20:mid=0.08; 21:mid=0.10; 22:mid=0.15; 23:mid=0.20",
+            "double_sim": 0.020,
+            "single_sim": 0.020,
+            "commit_margin": 0.050,
+            "commit_confirm": 2,
+            "commit_anchor": 0.55,
+        },
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL", {
+                    "tooltip": "Connect this after your checkpoint model. ReferenceLatent must also be connected in the conditioning path.",
+                }),
+                "preset": (["MIDUM_LOCK", "HARD_LOCK", "SOFT_LOCK", "custom"], {
+                    "default": "MIDUM_LOCK",
+                    "tooltip": "Pick how strongly the reference should hold. Any preset except custom ignores the manual settings below.",
+                }),
+                "reference_index": ("INT", {
+                    "default": 0, "min": 0, "max": 15, "step": 1,
+                    "tooltip": "Which reference image to use. 0 means the first reference.",
+                }),
+                "double_schedule": ("STRING", {
+                    "default": "0-3:mid=0.25; 4:mid=0.35; 5:mid=0.65; 6-7:mid=0.45",
+                    "multiline": False,
+                    "tooltip": "Custom preset only. Double block schedule.",
+                }),
+                "single_schedule": ("STRING", {
+                    "default": "0:mid=0.35; 1:mid=0.25; 2-10:mid=0.30; 11-19:mid=0.25; 20:mid=0.08; 21:mid=0.10; 22:mid=0.15; 23:mid=0.20",
+                    "multiline": False,
+                    "tooltip": "Custom preset only. Single block schedule.",
+                }),
+                "double_sim": ("FLOAT", {
+                    "default": 0.020, "min": 0.0, "max": 0.95, "step": 0.001,
+                    "tooltip": "Custom preset only. Higher means fewer double-block matches are allowed.",
+                }),
+                "single_sim": ("FLOAT", {
+                    "default": 0.020, "min": 0.0, "max": 0.95, "step": 0.001,
+                    "tooltip": "Custom preset only. Higher means fewer single-block matches are allowed.",
+                }),
+                "commit_margin": ("FLOAT", {
+                    "default": 0.035, "min": 0.0, "max": 0.5, "step": 0.005,
+                    "tooltip": "Custom preset only. Higher means the match has to be more obvious before it locks.",
+                }),
+                "commit_confirm": ("INT", {
+                    "default": 2, "min": 1, "max": 16, "step": 1,
+                    "tooltip": "Custom preset only. How many times the same match must repeat before it locks.",
+                }),
+                "commit_anchor": ("FLOAT", {
+                    "default": 0.50, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Custom preset only. How much pull remains after a token has locked.",
+                }),
+                "mask_threshold": ("FLOAT", {
+                    "default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Used only when a mask is connected. Lower keeps more edge tokens. Higher keeps only the strongest mask area.",
+                }),
+                "debug": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Print the active preset and schedules to the console.",
+                }),
+            },
+            "optional": {
+                "subject_mask": ("MASK", {
+                    "tooltip": "Optional mask for the reference image. Use it when the reference has more than one subject.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "conditioning/flux2klein"
+
+    @staticmethod
+    def _parse_schedule(text, max_block):
+        out = {}
+        if not text:
+            return out
+        for part in str(text).split(";"):
+            part = part.strip()
+            if not part or ":" not in part:
+                continue
+            block_part, value_part = part.split(":", 1)
+            value_part = value_part.strip()
+            if "=" in value_part:
+                value_part = value_part.split("=", 1)[1].strip()
+            try:
+                value = float(value_part)
+            except ValueError:
+                continue
+            try:
+                if "-" in block_part:
+                    start, end = block_part.split("-", 1)
+                    start, end = int(start.strip()), int(end.strip())
+                else:
+                    start = end = int(block_part.strip())
+            except ValueError:
+                continue
+            if start > end:
+                start, end = end, start
+            start = max(0, start)
+            end = min(max_block, end)
+            for idx in range(start, end + 1):
+                out[idx] = value
+        return out
+
+    def apply(self, model, preset="MIDUM_LOCK", reference_index=0,
+              double_schedule="0-3:mid=0.25; 4:mid=0.35; 5:mid=0.65; 6-7:mid=0.45",
+              single_schedule="0:mid=0.35; 1:mid=0.25; 2-10:mid=0.30; 11-19:mid=0.25; 20:mid=0.08; 21:mid=0.10; 22:mid=0.15; 23:mid=0.20",
+              double_sim=0.020, single_sim=0.020,
+              commit_margin=0.035, commit_confirm=2, commit_anchor=0.50,
+              mask_threshold=0.25, debug=False, subject_mask=None):
+        m = model.clone()
+
+        if preset in self.PRESETS:
+            cfg = self.PRESETS[preset].copy()
+        else:
+            cfg = {
+                "double_schedule": double_schedule,
+                "single_schedule": single_schedule,
+                "double_sim": float(double_sim),
+                "single_sim": float(single_sim),
+                "commit_margin": float(commit_margin),
+                "commit_confirm": int(commit_confirm),
+                "commit_anchor": float(commit_anchor),
+            }
+
+        ref_idx = int(reference_index)
+        double_map = self._parse_schedule(cfg["double_schedule"], 7)
+        single_map = self._parse_schedule(cfg["single_schedule"], 23)
+        mask_threshold = float(mask_threshold)
+
+        if subject_mask is not None:
+            mk = subject_mask
+            if mk.dim() == 4:
+                mk = mk[0, 0]
+            elif mk.dim() == 3:
+                mk = mk[0]
+            src_mask = mk.detach().float().cpu()
+        else:
+            src_mask = None
+
+        idx_cache = {}
+        commit_assign = {}
+        commit_hits = {}
+
+        def subject_indices(count, device):
+            if src_mask is None:
+                return None
+            if count in idx_cache:
+                cached = idx_cache[count]
+                return cached.to(device) if cached is not None else None
+
+            mh, mw = src_mask.shape[-2:]
+            target = mh / max(mw, 1)
+            best = (1, count)
+            best_err = float("inf")
+            limit = int(count ** 0.5) + 3
+            for h in range(1, limit):
+                if count % h == 0:
+                    w = count // h
+                    for hh, ww in ((h, w), (w, h)):
+                        err = abs(hh / max(ww, 1) - target)
+                        if err < best_err:
+                            best_err = err
+                            best = (hh, ww)
+
+            pooled = F.adaptive_avg_pool2d(src_mask[None, None], best).view(-1)
+            keep = pooled >= mask_threshold
+            if keep.sum().item() == 0:
+                idx_cache[count] = None
+                return None
+            idx = torch.nonzero(keep, as_tuple=False).squeeze(-1)
+            idx_cache[count] = idx
+            return idx.to(device)
+
+        def ref_slice(ref_tokens, base_offset):
+            if not ref_tokens:
+                return None
+            idx = min(ref_idx, len(ref_tokens) - 1)
+            offset = sum(ref_tokens[:idx])
+            count = ref_tokens[idx]
+            if count <= 0:
+                return None
+            return base_offset + offset, base_offset + offset + count
+
+        def commit_delta(gen_features, ref_features, strength, sim_floor, cache_key):
+            if strength <= 0.0:
+                return None
+
+            gen_f = gen_features.float()
+            ref_f = ref_features.float()
+            gen_count = gen_f.shape[1]
+            ref_count = ref_f.shape[1]
+            if ref_count <= 0:
+                return None
+
+            gen_norm = F.normalize(gen_f - gen_f.mean(dim=1, keepdim=True), dim=-1)
+            ref_norm = F.normalize(ref_f - ref_f.mean(dim=1, keepdim=True), dim=-1)
+            sim = torch.bmm(gen_norm, ref_norm.transpose(1, 2))
+
+            subj_idx = subject_indices(ref_count, gen_f.device)
+            if subj_idx is not None:
+                mask = torch.zeros((1, 1, ref_count), device=sim.device, dtype=sim.dtype)
+                mask[0, 0, subj_idx] = 1.0
+                sim = torch.where(mask > 0.5, sim, torch.full_like(sim, torch.finfo(sim.dtype).min))
+            elif gen_count == ref_count:
+                diag = torch.arange(gen_count, device=sim.device)
+                sim[:, diag, diag] = torch.finfo(sim.dtype).min
+
+            k = 2 if ref_count > 1 else 1
+            top_vals, top_idx = torch.topk(sim, k=k, dim=-1)
+            best_sim = top_vals[..., 0]
+            best_idx = top_idx[..., 0]
+            second_sim = top_vals[..., 1] if k == 2 else torch.zeros_like(best_sim)
+            margin = best_sim - second_sim
+            valid = torch.isfinite(best_sim) & (best_sim >= sim_floor)
+
+            prev = commit_assign.get(cache_key)
+            prev_hits = commit_hits.get(cache_key)
+            if prev is None or prev.shape != best_idx.shape:
+                hits = torch.ones_like(best_idx, dtype=torch.int16)
+            else:
+                if prev_hits is None or prev_hits.shape != best_idx.shape:
+                    prev_hits = torch.zeros_like(best_idx, dtype=torch.int16)
+                hits = torch.where(
+                    (prev == best_idx) & valid,
+                    (prev_hits + 1).clamp(max=32767),
+                    torch.ones_like(prev_hits),
+                )
+            hits = torch.where(valid, hits, torch.zeros_like(hits))
+            commit_assign[cache_key] = best_idx.detach()
+            commit_hits[cache_key] = hits.detach()
+
+            committed = valid & (hits >= cfg["commit_confirm"]) & (margin >= cfg["commit_margin"])
+            gather_idx = best_idx.clamp(min=0).unsqueeze(-1).expand(-1, -1, ref_f.shape[-1])
+            best_ref = torch.gather(ref_f, 1, gather_idx)
+
+            denom = max(1.0 - sim_floor, 1e-6)
+            confidence = ((best_sim - sim_floor) / denom).clamp(0.0, 1.0)
+            if cfg["commit_margin"] > 0.0:
+                margin_weight = (margin / cfg["commit_margin"]).clamp(0.0, 1.0)
+            else:
+                margin_weight = torch.ones_like(confidence)
+            anchor = torch.where(
+                committed,
+                torch.full_like(confidence, cfg["commit_anchor"]),
+                torch.ones_like(confidence),
+            )
+            weight = (confidence * margin_weight * anchor * strength).unsqueeze(-1)
+            weight = torch.where(valid.unsqueeze(-1), weight, torch.zeros_like(weight))
+            return (best_ref.to(gen_features.dtype) - gen_features) * weight.to(gen_features.dtype)
+
+        def output_patch(attn, extra_options):
+            ref_tokens = extra_options.get("reference_image_num_tokens", []) or []
+            img_slice = extra_options.get("img_slice")
+            if not ref_tokens or img_slice is None:
+                return attn
+
+            block_type = extra_options.get("block_type", "double")
+            block_idx = int(extra_options.get("block_index", 0))
+            if block_type == "double":
+                strength = double_map.get(block_idx, 0.0)
+                sim_floor = float(cfg["double_sim"])
+            elif block_type == "single":
+                strength = single_map.get(block_idx, 0.0)
+                sim_floor = float(cfg["single_sim"])
+            else:
+                return attn
+            if strength <= 0.0:
+                return attn
+
+            txt_end, total_seq = int(img_slice[0]), int(img_slice[1])
+            total_ref = sum(ref_tokens)
+            gen_start = txt_end
+            gen_end = total_seq - total_ref
+            rs = ref_slice(ref_tokens, total_seq - total_ref)
+            if gen_end <= gen_start or rs is None or rs[1] > total_seq:
+                return attn
+
+            gen_features = attn[:, gen_start:gen_end]
+            ref_features = attn[:, rs[0]:rs[1]]
+            delta = commit_delta(gen_features, ref_features, strength, sim_floor, (block_type, block_idx, "mid_img"))
+            if delta is None:
+                return attn
+
+            out = attn.clone()
+            out[:, gen_start:gen_end] = gen_features + delta
+            return out
+
+        if debug:
+            print(f"[IdentityFeatureTransferV3] preset={preset} doubles={double_map} singles={single_map}")
+
+        m.set_model_attn1_output_patch(output_patch)
+        return (m,)
+
+
 NODE_CLASS_MAPPINGS = {
     "IdentityFeatureTransfer": IdentityFeatureTransfer,
     "IdentityFeatureTransferAdvanced": IdentityFeatureTransferAdvanced,
+    "IdentityFeatureTransferV3": IdentityFeatureTransferV3,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IdentityFeatureTransfer": "FLUX.2 Klein Identity Feature Transfer",
     "IdentityFeatureTransferAdvanced": "FLUX.2 Klein Identity Feature Transfer Advanced",
+    "IdentityFeatureTransferV3": "FLUX.2 Klein Identity Feature Transfer V3",
 }
